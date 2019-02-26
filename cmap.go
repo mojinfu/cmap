@@ -58,6 +58,7 @@ type Map struct {
 	// map, the dirty map will be promoted to the read map (in the unamended
 	// state) and the next store to the map will make a new dirty copy.
 	misses int
+	Length int64
 }
 
 // readOnly is an immutable struct stored atomically in the Map.read field.
@@ -132,33 +133,56 @@ func (e *entry) load() (value interface{}, ok bool) {
 	}
 	return *(*interface{})(p), true
 }
+func (m *Map) LengthReduce() {
+	atomic.AddInt64(&m.Length, -1)
+}
+func (m *Map) LengthIncrease() {
+	atomic.AddInt64(&m.Length, 1)
+}
 
 // Store sets the value for a key.
 func (m *Map) Store(key, value interface{}) {
 	read, _ := m.read.Load().(readOnly)
-	if e, ok := read.m[key]; ok && e.tryStore(&value) {
-		return
+	//read 中 是nil 或者 normal  直接赋值
+	// 是nil时  说明dirty map中这个key 还存在，  如果已经是expunged，说明key不在dirty map中了，不能直接赋值。
+	if e, ok := read.m[key]; ok {
+		created, stored := e.tryStore(&value)
+		if stored {
+			if created {
+				m.LengthIncrease()
+			}
+			return
+		}
 	}
 
 	m.mu.Lock()
 	read, _ = m.read.Load().(readOnly)
 	if e, ok := read.m[key]; ok {
+		//如果在read中存在 且为expunged（说明key不在dirty map中了）那么 指向nil，然后往dirty map中插入nil的key
+		//然后赋值
+		////如果在read中存在 且为 不为 expunged（说明key在dirty map中）那么 直接赋值
 		if e.unexpungeLocked() {
 			// The entry was previously expunged, which implies that there is a
 			// non-nil dirty map and this entry is not in it.
 			m.dirty[key] = e
+			m.LengthIncrease()
 		}
 		e.storeLocked(&value)
 	} else if e, ok := m.dirty[key]; ok {
-		e.storeLocked(&value)
+		if e.createOrMustStoreLocked(&value) {
+			m.LengthIncrease()
+		}
 	} else {
 		if !read.amended {
 			// We're adding the first new key to the dirty map.
 			// Make sure it is allocated and mark the read-only map as incomplete.
+			//如果dirty map 为nil，那么把read中所有normal key 拷贝到 dirty 中
+			//拷贝过程中要把 read 中的nil 变成expunged，因为这些key在dirty中找不到了
 			m.dirtyLocked()
 			m.read.Store(readOnly{m: read.m, amended: true})
 		}
 		m.dirty[key] = newEntry(value)
+		m.LengthIncrease()
 	}
 	m.mu.Unlock()
 }
@@ -167,18 +191,22 @@ func (m *Map) Store(key, value interface{}) {
 //
 // If the entry is expunged, tryStore returns false and leaves the entry
 // unchanged.
-func (e *entry) tryStore(i *interface{}) bool {
+func (e *entry) tryStore(i *interface{}) (created, stored bool) {
 	p := atomic.LoadPointer(&e.p)
 	if p == expunged {
-		return false
+		return false, false
 	}
 	for {
+		if atomic.CompareAndSwapPointer(&e.p, nil, unsafe.Pointer(i)) {
+			//map length add
+			return true, true
+		}
 		if atomic.CompareAndSwapPointer(&e.p, p, unsafe.Pointer(i)) {
-			return true
+			return false, true
 		}
 		p = atomic.LoadPointer(&e.p)
 		if p == expunged {
-			return false
+			return false, false
 		}
 	}
 }
@@ -197,16 +225,33 @@ func (e *entry) unexpungeLocked() (wasExpunged bool) {
 func (e *entry) storeLocked(i *interface{}) {
 	atomic.StorePointer(&e.p, unsafe.Pointer(i))
 }
+func (e *entry) createOrMustStoreLocked(i *interface{}) (created bool) {
+	p := atomic.LoadPointer(&e.p)
+	for {
+		if atomic.CompareAndSwapPointer(&e.p, nil, unsafe.Pointer(i)) {
+			//map length add
+			return true
+		}
+		if atomic.CompareAndSwapPointer(&e.p, p, unsafe.Pointer(i)) {
+			return false
+		}
+		p = atomic.LoadPointer(&e.p)
+	}
+}
 
 // LoadOrStore returns the existing value for the key if present.
 // Otherwise, it stores and returns the given value.
 // The loaded result is true if the value was loaded, false if stored.
 func (m *Map) LoadOrStore(key, value interface{}) (actual interface{}, loaded bool) {
 	// Avoid locking if it's a clean hit.
+	stored := false
 	read, _ := m.read.Load().(readOnly)
 	if e, ok := read.m[key]; ok {
-		actual, loaded, ok := e.tryLoadOrStore(value)
+		actual, loaded, stored, ok := e.tryLoadOrStore(value)
 		if ok {
+			if stored {
+				m.LengthIncrease()
+			}
 			return actual, loaded
 		}
 	}
@@ -216,10 +261,14 @@ func (m *Map) LoadOrStore(key, value interface{}) (actual interface{}, loaded bo
 	if e, ok := read.m[key]; ok {
 		if e.unexpungeLocked() {
 			m.dirty[key] = e
+			m.LengthIncrease()
 		}
-		actual, loaded, _ = e.tryLoadOrStore(value)
+		actual, loaded, _, _ = e.tryLoadOrStore(value)
 	} else if e, ok := m.dirty[key]; ok {
-		actual, loaded, _ = e.tryLoadOrStore(value)
+		actual, loaded, stored, _ = e.tryLoadOrStore(value)
+		if stored {
+			m.LengthIncrease()
+		}
 		m.missLocked()
 	} else {
 		if !read.amended {
@@ -229,6 +278,7 @@ func (m *Map) LoadOrStore(key, value interface{}) (actual interface{}, loaded bo
 			m.read.Store(readOnly{m: read.m, amended: true})
 		}
 		m.dirty[key] = newEntry(value)
+		m.LengthIncrease()
 		actual, loaded = value, false
 	}
 	m.mu.Unlock()
@@ -241,13 +291,13 @@ func (m *Map) LoadOrStore(key, value interface{}) (actual interface{}, loaded bo
 //
 // If the entry is expunged, tryLoadOrStore leaves the entry unchanged and
 // returns with ok==false.
-func (e *entry) tryLoadOrStore(i interface{}) (actual interface{}, loaded, ok bool) {
+func (e *entry) tryLoadOrStore(i interface{}) (actual interface{}, loaded, created, ok bool) {
 	p := atomic.LoadPointer(&e.p)
 	if p == expunged {
-		return nil, false, false
+		return nil, false, false, false
 	}
 	if p != nil {
-		return *(*interface{})(p), true, true
+		return *(*interface{})(p), true, false, true
 	}
 
 	// Copy the interface after the first load to make this method more amenable
@@ -256,14 +306,15 @@ func (e *entry) tryLoadOrStore(i interface{}) (actual interface{}, loaded, ok bo
 	ic := i
 	for {
 		if atomic.CompareAndSwapPointer(&e.p, nil, unsafe.Pointer(&ic)) {
-			return i, false, true
+			//add
+			return i, false, true, true
 		}
 		p = atomic.LoadPointer(&e.p)
 		if p == expunged {
-			return nil, false, false
+			return nil, false, false, false
 		}
 		if p != nil {
-			return *(*interface{})(p), true, true
+			return *(*interface{})(p), true, false, true
 		}
 	}
 }
@@ -272,17 +323,32 @@ func (e *entry) tryLoadOrStore(i interface{}) (actual interface{}, loaded, ok bo
 func (m *Map) Delete(key interface{}) {
 	read, _ := m.read.Load().(readOnly)
 	e, ok := read.m[key]
+	//如果read map中存在，normal key则化为 nil
+	//如果不存在，在dirty map中 用delete 方法 删除之
 	if !ok && read.amended {
 		m.mu.Lock()
 		read, _ = m.read.Load().(readOnly)
 		e, ok = read.m[key]
 		if !ok && read.amended {
-			delete(m.dirty, key)
+			de, dok := m.dirty[key]
+			if dok {
+				//需要delete
+				dep := atomic.LoadPointer(&de.p)
+				if dep == nil || dep == expunged {
+					//无长度变化
+				} else {
+					//长度变化
+					m.LengthReduce()
+				}
+				delete(m.dirty, key)
+			}
 		}
 		m.mu.Unlock()
 	}
 	if ok {
-		e.delete()
+		if e.delete() {
+			m.LengthReduce()
+		}
 	}
 }
 
@@ -358,6 +424,7 @@ func (m *Map) dirtyLocked() {
 
 	read, _ := m.read.Load().(readOnly)
 	m.dirty = make(map[interface{}]*entry, len(read.m))
+	//把read map中的nil 全变成 expunged， normal key 存入dirty map
 	for k, e := range read.m {
 		if !e.tryExpungeLocked() {
 			m.dirty[k] = e
