@@ -54,3 +54,4 @@ go get "github.com/mojinfu/cmap"
 
 The package is now imported under the "cmap" namespace.
 
+		为什么golang的 std map线程不安全，
