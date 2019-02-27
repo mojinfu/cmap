@@ -58,6 +58,7 @@ type Map struct {
 	// map, the dirty map will be promoted to the read map (in the unamended
 	// state) and the next store to the map will make a new dirty copy.
 	misses int
+	//lock free length
 	length int64
 }
 
