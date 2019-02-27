@@ -58,7 +58,7 @@ type Map struct {
 	// map, the dirty map will be promoted to the read map (in the unamended
 	// state) and the next store to the map will make a new dirty copy.
 	misses int
-	Length int64
+	length int64
 }
 
 // readOnly is an immutable struct stored atomically in the Map.read field.
@@ -94,6 +94,9 @@ type entry struct {
 	p unsafe.Pointer // *interface{}
 }
 
+func (m *Map) Length() int64 {
+	return m.length
+}
 func newEntry(i interface{}) *entry {
 	return &entry{p: unsafe.Pointer(&i)}
 }
@@ -134,10 +137,10 @@ func (e *entry) load() (value interface{}, ok bool) {
 	return *(*interface{})(p), true
 }
 func (m *Map) LengthReduce() {
-	atomic.AddInt64(&m.Length, -1)
+	atomic.AddInt64(&m.length, -1)
 }
 func (m *Map) LengthIncrease() {
-	atomic.AddInt64(&m.Length, 1)
+	atomic.AddInt64(&m.length, 1)
 }
 
 // Store sets the value for a key.
