@@ -1,4 +1,6 @@
-# cmap support feather
+# cmap 
+
+## support feather
 
 1. support O(1) length method,  like the issue decsribed here https://github.com/golang/go/issues/20680
 
@@ -8,9 +10,7 @@
 
 		目前sync map 对不同的key操作，对应的都是同一个锁，可以通过多锁的方式，减少竞争。（实现中）
 
-In Go 1.9, `sync.Map` was introduced.
-
-but  `sync.Map`  dont support length method , 
+In Go 1.9, `sync.Map` was introduced, but  `sync.Map`  dont support length method , 
 
 when you need get the length of your map
 
