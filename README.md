@@ -14,6 +14,8 @@ but  `sync.Map`  dont support length method ,
 
 when you need get the length of your map
 
+获取map长度示例对比
+
 ## sync.map usage 
 ```go
 
@@ -30,7 +32,9 @@ myMap.Range(func(_, _ interface{}) bool {
 ```
 it will lock your map, and take O(n) times
 
-## cmp usage
+此操作会触发锁，复杂度O(n)
+
+## cmp usage 
 
 ```go
 import (
@@ -41,6 +45,7 @@ length := myCMap.Length()
 ```
 cmap will **not** lock your cmap, and take O(1) times
 
+此操作**不**会触发锁，复杂度O(1)
 
 ## get package
 ```bash
