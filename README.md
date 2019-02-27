@@ -54,4 +54,14 @@ go get "github.com/mojinfu/cmap"
 
 The package is now imported under the "cmap" namespace.
 
-		为什么golang的 std map线程不安全，
+after fixed logic bugs，the result of len method in 'cmap' package is working perfectly
+then i found
+benchmark : 100 times Store(i, i) and Delete(i) in env  goos: darwin ; goarch: amd64
+
+ | package | ns/op| B/op|allocs/op|
+| :------:| :------: | :------: | :------: |
+| sync.Map| 21230 ns/op|	5600 B/op|	499 allocs/op|
+| CMap |24243 ns/op|	5600 B/op	|499 allocs/op|
+ ----------
+
+ it means each Store or Delete action will take another 15ns, I think cmap will be useful in some scene.
